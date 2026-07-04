@@ -79,6 +79,20 @@ def clean_text(value, limit=None):
     return text
 
 
+def unique_keep_order(items, limit):
+    seen = set()
+    out = []
+    for item in items:
+        key = str(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -183,16 +197,20 @@ def summarize_claude_session(path, fallback_home):
     info = analyze_claude_session(path, fallback_home)
     user_messages = []
     assistant_messages = []
+    all_texts = []
     summaries = []
     tool_names = {}
     for obj in read_jsonl(path):
         obj_type = obj.get("type")
         if obj_type == "summary" and obj.get("summary"):
-            summaries.append(clean_text(obj.get("summary"), 1200))
+            summary_text = clean_text(obj.get("summary"), 12000)
+            summaries.append(summary_text)
+            all_texts.append(summary_text)
         if obj_type == "user" and isinstance(obj.get("message"), dict):
-            text = clean_text(text_from_content(obj["message"].get("content")), 1000)
+            text = clean_text(text_from_content(obj["message"].get("content")), 6000)
             if text:
                 user_messages.append(text)
+                all_texts.append(text)
         elif obj_type == "assistant" and isinstance(obj.get("message"), dict):
             content = obj["message"].get("content")
             if isinstance(content, list):
@@ -203,11 +221,12 @@ def summarize_claude_session(path, fallback_home):
                         tool_names[name] = tool_names.get(name, 0) + 1
                     elif isinstance(item, dict) and item.get("type") == "text":
                         parts.append(str(item.get("text", "")))
-                text = clean_text("\n".join(parts), 1000)
+                text = clean_text("\n".join(parts), 6000)
             else:
-                text = clean_text(text_from_content(content), 1000)
+                text = clean_text(text_from_content(content), 6000)
             if text:
                 assistant_messages.append(text)
+                all_texts.append(text)
 
     purpose = clean_text(info["title"], 28)
     if not purpose or purpose == path.stem:
@@ -219,12 +238,14 @@ def summarize_claude_session(path, fallback_home):
         **info,
         "purpose": purpose,
         "detail": build_detail_summary(info["title"], summaries, user_messages),
+        "modules": extract_modules(summaries + user_messages),
+        "paths": extract_paths(all_texts),
         "user_count": len(user_messages),
         "assistant_count": len(assistant_messages),
-        "summary_blocks": summaries[:5],
-        "first_user_messages": user_messages[:3],
-        "recent_user_messages": user_messages[-5:],
-        "recent_assistant_messages": assistant_messages[-3:],
+        "summary_blocks": summaries[:8],
+        "first_user_messages": user_messages[:8],
+        "recent_user_messages": user_messages[-12:],
+        "recent_assistant_messages": assistant_messages[-8:],
         "tool_names": sorted(tool_names.items(), key=lambda item: (-item[1], item[0]))[:12],
     }
 
@@ -232,7 +253,7 @@ def summarize_claude_session(path, fallback_home):
 def build_detail_summary(title, summaries, user_messages):
     for text in summaries:
         if text:
-            return clean_text(text, 1800)
+            return clean_text(text, 5000)
     for text in user_messages:
         marker = "Primary Request and Intent:"
         if marker in text:
@@ -240,10 +261,33 @@ def build_detail_summary(title, summaries, user_messages):
             next_marker = "2. Key Technical Concepts:"
             if next_marker in tail:
                 tail = tail.split(next_marker, 1)[0]
-            return clean_text(tail, 1800)
+            return clean_text(tail, 5000)
     if user_messages:
-        return clean_text(user_messages[0], 1200)
-    return clean_text(title, 1200)
+        return clean_text(user_messages[0], 3000)
+    return clean_text(title, 3000)
+
+
+def extract_modules(texts):
+    modules = []
+    section_re = re.compile(r"(?:^|\s)(\d{1,2})\.\s+([A-Z][A-Za-z0-9 /&()_-]{2,80}:)(.*?)(?=(?:\s\d{1,2}\.\s+[A-Z][A-Za-z0-9 /&()_-]{2,80}:)|$)", re.S)
+    for text in texts:
+        for match in section_re.finditer(text):
+            title = clean_text(match.group(2).rstrip(":"), 100)
+            body = clean_text(match.group(3), 2500)
+            if title and body:
+                modules.append({"title": title, "body": body})
+    return unique_keep_order([json.dumps(item, ensure_ascii=False) for item in modules], 16)
+
+
+def extract_paths(texts):
+    path_re = re.compile(r"(?:(?:/[A-Za-z0-9._@%+=:,~ -]+)+|(?:[A-Za-z]:[\\/][^\s`'\"<>|]+))")
+    paths = []
+    for text in texts:
+        for match in path_re.finditer(text):
+            value = match.group(0).strip(".,);]")
+            if len(value) >= 8:
+                paths.append(value)
+    return unique_keep_order(paths, 100)
 
 
 def convert_claude_to_rollout(path, thread_id, info, cli_version):
@@ -324,6 +368,7 @@ def md_path(path):
 
 def markdown_summary(thread_id, source_path, original_copy, summary_path, thread_row, summary):
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"]) or "无明显工具记录"
+    modules = [json.loads(item) for item in summary["modules"]]
     lines = [
         f"# {summary['purpose']}",
         "",
@@ -341,6 +386,10 @@ def markdown_summary(thread_id, source_path, original_copy, summary_path, thread
         clean_text(summary["detail"], 1800) or summary["purpose"],
         "",
     ]
+    if modules:
+        lines += ["## 模块/阶段拆解", ""]
+        for item in modules:
+            lines += [f"### {item['title']}", "", item["body"], ""]
     if summary["summary_blocks"]:
         lines += ["## Claude 原始摘要片段", ""]
         for item in summary["summary_blocks"]:
@@ -353,6 +402,15 @@ def markdown_summary(thread_id, source_path, original_copy, summary_path, thread
         lines += ["## 最近的用户请求", ""]
         for item in summary["recent_user_messages"]:
             lines += [f"- {item}", ""]
+    if summary["recent_assistant_messages"]:
+        lines += ["## 最近的助手回复", ""]
+        for item in summary["recent_assistant_messages"]:
+            lines += [f"- {item}", ""]
+    if summary["paths"]:
+        lines += ["## 会话中提到的路径", ""]
+        for item in summary["paths"]:
+            lines += [f"- `{item}`"]
+        lines += [""]
     lines += [
         "## 使用建议",
         "",
@@ -385,6 +443,8 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
     recent_requests = "\n".join(f"- {item}" for item in summary["recent_user_messages"][:4]) or "- 无"
     summary_blocks = "\n".join(f"- {item}" for item in summary["summary_blocks"][:2]) or "- 无 Claude summary 块，已从首尾用户请求抽取摘要"
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"][:8]) or "无明显工具记录"
+    modules = [json.loads(item) for item in summary["modules"][:5]]
+    module_text = "\n".join(f"- {item['title']}: {clean_text(item['body'], 500)}" for item in modules) or "- 无明确模块拆解"
     assistant_text = "\n".join(
         [
             f"Claude 导入会话已整理为归档入口：{summary['purpose']}",
@@ -394,6 +454,9 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
             "",
             "## 原始/压缩摘要",
             summary_blocks,
+            "",
+            "## 模块/阶段",
+            module_text,
             "",
             "## 开始时的用户请求",
             first_requests,
@@ -421,11 +484,15 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
     ]
 
 
-def archive_and_compact_imports(con, records, codex_home, archive_root, fallback_home, cli_version, dry_run):
+def archive_and_compact_imports(con, records, codex_home, archive_root, fallback_home, cli_version, dry_run, overwrite_manual_titles):
     require_threads_columns(con, ["id", "rollout_path", "title", "preview", "created_at", "updated_at", "recency_at"])
     originals_dir = archive_root / "originals"
     summaries_dir = archive_root / "summaries"
     rollout_backups_dir = archive_root / "rollout_backups"
+    existing_index_path = archive_root / "index.json"
+    existing_index = {}
+    if existing_index_path.exists():
+        existing_index = {item.get("thread_id"): item for item in json.loads(existing_index_path.read_text(encoding="utf-8"))}
     if not dry_run:
         archive_root.mkdir(parents=True, exist_ok=True)
         originals_dir.mkdir(parents=True, exist_ok=True)
@@ -434,6 +501,7 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
 
     index_rows = []
     changed = 0
+    skipped_manual_titles = 0
     for record in records:
         thread_id = record.get("imported_thread_id")
         source_path = Path(str(record.get("source_path") or "")).expanduser()
@@ -446,6 +514,15 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
         if not row:
             continue
         thread_row = {"id": row[0], "rollout_path": row[1], "title": row[2], "preview": row[3]}
+        old_index_item = existing_index.get(thread_id)
+        manual_title = bool(old_index_item and thread_row["title"] != old_index_item.get("purpose"))
+        if manual_title and not overwrite_manual_titles:
+            preserved = dict(old_index_item)
+            preserved["manual_title"] = thread_row["title"]
+            preserved["skipped_reason"] = "manual_title_preserved"
+            index_rows.append(preserved)
+            skipped_manual_titles += 1
+            continue
         rollout_path = Path(thread_row["rollout_path"])
         summary = summarize_claude_session(source_path, fallback_home)
         day = summary["first"].strftime("%Y/%m/%d")
@@ -517,7 +594,7 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
     if not dry_run:
         index_path = archive_root / "index.json"
         index_path.write_text(json.dumps(index_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return len(index_rows), changed
+    return len(index_rows), changed, skipped_manual_titles
 
 
 def load_index(index_path):
@@ -677,6 +754,7 @@ def main():
     parser.add_argument("--import-missing", action="store_true")
     parser.add_argument("--archive-and-compact-imports", action="store_true")
     parser.add_argument("--archive-root", default="~/.codex/imported_claude_archive")
+    parser.add_argument("--overwrite-manual-titles", action="store_true")
     parser.add_argument("--include-subagents", action="store_true")
     parser.add_argument("--no-backup", action="store_true")
     args = parser.parse_args()
@@ -704,7 +782,7 @@ def main():
         if args.archive_and_compact_imports:
             con = sqlite3.connect(state_db)
             try:
-                archived, _ = archive_and_compact_imports(
+                archived, _, skipped_manual = archive_and_compact_imports(
                     con,
                     records,
                     codex_home,
@@ -712,10 +790,12 @@ def main():
                     fallback_home,
                     args.cli_version,
                     True,
+                    args.overwrite_manual_titles,
                 )
             finally:
                 con.close()
             print(f"would_archive_and_compact_imported_sessions={archived}")
+            print(f"would_skip_manual_title_sessions={skipped_manual}")
             return
         for path in missing[:20]:
             info = analyze_claude_session(path, fallback_home)
@@ -737,12 +817,13 @@ def main():
         imported = 0
         archived = 0
         archive_updates = 0
+        skipped_manual = 0
         if args.fix_existing_timestamps:
             fixed = fix_existing_timestamps(con, records, fallback_home)
         if args.import_missing:
             imported = import_missing_sessions(con, index, missing, sessions_dir, fallback_home, args.cli_version)
         if args.archive_and_compact_imports:
-            archived, archive_updates = archive_and_compact_imports(
+            archived, archive_updates, skipped_manual = archive_and_compact_imports(
                 con,
                 records,
                 codex_home,
@@ -750,6 +831,7 @@ def main():
                 fallback_home,
                 args.cli_version,
                 False,
+                args.overwrite_manual_titles,
             )
         con.commit()
     except Exception:
@@ -765,6 +847,7 @@ def main():
     print(f"imported_missing_sessions={imported}")
     print(f"archived_imported_sessions={archived}")
     print(f"archive_thread_updates={archive_updates}")
+    print(f"skipped_manual_title_sessions={skipped_manual}")
 
 
 if __name__ == "__main__":

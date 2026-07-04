@@ -43,6 +43,7 @@ Use this skill when a macOS or Windows user wants to migrate local Claude Code h
    python3 scripts/import_claude_sessions_to_codex.py --archive-and-compact-imports
    ```
    This keeps Codex's thread list clickable while storing full original JSONL files and Markdown summaries under `~/.codex/imported_claude_archive/`.
+   Existing manually edited Codex thread titles are preserved by default. Use `--overwrite-manual-titles` only when the user explicitly wants regenerated titles to replace UI edits.
 6. Verify parity:
    ```bash
    codex doctor --json
@@ -73,6 +74,7 @@ Use this skill when a macOS or Windows user wants to migrate local Claude Code h
 - If `state_5.sqlite` schema differs, inspect `PRAGMA table_info(threads)` before writing and adapt conservatively.
 - If `gh` or network commands are needed to publish a skill, verify authentication before assuming GitHub access works.
 - For long imported sessions, prefer starting a fresh Codex thread and reading the Claude source JSONL selectively instead of continuing the imported rollout directly.
+- Keep the Codex thread entry compact, but make the sidecar Markdown summary rich: preserve objectives, module/phase breakdowns, decisions, paths, tool usage, errors/fixes, first requests, recent requests, and recent assistant outputs.
 
 ## Script
 
