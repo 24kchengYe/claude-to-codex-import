@@ -218,6 +218,7 @@ def summarize_claude_session(path, fallback_home):
     return {
         **info,
         "purpose": purpose,
+        "detail": build_detail_summary(info["title"], summaries, user_messages),
         "user_count": len(user_messages),
         "assistant_count": len(assistant_messages),
         "summary_blocks": summaries[:5],
@@ -226,6 +227,23 @@ def summarize_claude_session(path, fallback_home):
         "recent_assistant_messages": assistant_messages[-3:],
         "tool_names": sorted(tool_names.items(), key=lambda item: (-item[1], item[0]))[:12],
     }
+
+
+def build_detail_summary(title, summaries, user_messages):
+    for text in summaries:
+        if text:
+            return clean_text(text, 1800)
+    for text in user_messages:
+        marker = "Primary Request and Intent:"
+        if marker in text:
+            tail = text.split(marker, 1)[1]
+            next_marker = "2. Key Technical Concepts:"
+            if next_marker in tail:
+                tail = tail.split(next_marker, 1)[0]
+            return clean_text(tail, 1800)
+    if user_messages:
+        return clean_text(user_messages[0], 1200)
+    return clean_text(title, 1200)
 
 
 def convert_claude_to_rollout(path, thread_id, info, cli_version):
@@ -316,7 +334,7 @@ def markdown_summary(thread_id, source_path, original_copy, summary_path, thread
         "",
         "## 这个会话主要在做什么",
         "",
-        clean_text(summary["title"], 500) or summary["purpose"],
+        clean_text(summary["detail"], 1800) or summary["purpose"],
         "",
     ]
     if summary["summary_blocks"]:
@@ -359,15 +377,35 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
         "external_agent_compacted": True,
     }
     user_text = f"打开 Claude 导入会话归档：{summary['purpose']}"
+    first_requests = "\n".join(f"- {item}" for item in summary["first_user_messages"][:2]) or "- 无"
+    recent_requests = "\n".join(f"- {item}" for item in summary["recent_user_messages"][:4]) or "- 无"
+    summary_blocks = "\n".join(f"- {item}" for item in summary["summary_blocks"][:2]) or "- 无 Claude summary 块，已从首尾用户请求抽取摘要"
+    tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"][:8]) or "无明显工具记录"
     assistant_text = "\n".join(
         [
             f"Claude 导入会话已整理为归档入口：{summary['purpose']}",
             "",
-            f"- 详细内容参考原 Claude JSONL: `{source_path}`",
-            f"- 归档副本: `{original_copy}`",
-            f"- 结构化摘要: `{summary_path}`",
-            f"- 时间: `{iso_z(first)}` 到 `{iso_z(last)}`",
+            "## 会话在做什么",
+            clean_text(summary["detail"], 1800) or summary["purpose"],
+            "",
+            "## 原始/压缩摘要",
+            summary_blocks,
+            "",
+            "## 开始时的用户请求",
+            first_requests,
+            "",
+            "## 最近的用户请求",
+            recent_requests,
+            "",
+            "## 工具和规模",
+            f"- 常见工具: {tools}",
             f"- 原消息规模: user {summary['user_count']} / assistant {summary['assistant_count']} / rows {summary['total']}",
+            "",
+            "## 文件路径",
+            f"- [详细内容参考原 Claude JSONL]({source_path})",
+            f"- [归档副本]({original_copy})",
+            f"- [结构化摘要]({summary_path})",
+            f"- 时间: `{iso_z(first)}` 到 `{iso_z(last)}`",
             "",
             "为避免超出 Codex 上下文窗口，这里不再内联完整 Claude 历史。需要继续工作时，请新开 Codex 会话，并按上面的摘要或原始 JSONL 路径定向读取相关片段。",
         ]
