@@ -1,0 +1,6 @@
+interface:
+  display_name: "Claude to Codex Import"
+  short_description: "Migrate Claude Code sessions into Codex on macOS"
+  default_prompt: "Use $claude-to-codex-import to import my local Claude Code conversations into Codex on macOS."
+policy:
+  allow_implicit_invocation: true
