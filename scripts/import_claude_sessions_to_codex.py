@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import re
 import uuid
 from pathlib import Path
 
@@ -69,6 +70,13 @@ def text_from_content(content):
                 parts.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def clean_text(value, limit=None):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if limit and len(text) > limit:
+        return text[: limit - 1].rstrip() + "..."
+    return text
 
 
 def sha256_file(path):
@@ -171,6 +179,55 @@ def analyze_claude_session(path, fallback_home):
     }
 
 
+def summarize_claude_session(path, fallback_home):
+    info = analyze_claude_session(path, fallback_home)
+    user_messages = []
+    assistant_messages = []
+    summaries = []
+    tool_names = {}
+    for obj in read_jsonl(path):
+        obj_type = obj.get("type")
+        if obj_type == "summary" and obj.get("summary"):
+            summaries.append(clean_text(obj.get("summary"), 1200))
+        if obj_type == "user" and isinstance(obj.get("message"), dict):
+            text = clean_text(text_from_content(obj["message"].get("content")), 1000)
+            if text:
+                user_messages.append(text)
+        elif obj_type == "assistant" and isinstance(obj.get("message"), dict):
+            content = obj["message"].get("content")
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "tool_use":
+                        name = str(item.get("name") or "tool")
+                        tool_names[name] = tool_names.get(name, 0) + 1
+                    elif isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(str(item.get("text", "")))
+                text = clean_text("\n".join(parts), 1000)
+            else:
+                text = clean_text(text_from_content(content), 1000)
+            if text:
+                assistant_messages.append(text)
+
+    purpose = clean_text(info["title"], 28)
+    if not purpose or purpose == path.stem:
+        purpose = clean_text(user_messages[0] if user_messages else path.stem, 28)
+    if purpose.startswith("<local-command-caveat>"):
+        purpose = clean_text(user_messages[0].replace("<local-command-caveat>", "") if user_messages else "本地命令会话", 28)
+
+    return {
+        **info,
+        "purpose": purpose,
+        "user_count": len(user_messages),
+        "assistant_count": len(assistant_messages),
+        "summary_blocks": summaries[:5],
+        "first_user_messages": user_messages[:3],
+        "recent_user_messages": user_messages[-5:],
+        "recent_assistant_messages": assistant_messages[-3:],
+        "tool_names": sorted(tool_names.items(), key=lambda item: (-item[1], item[0]))[:12],
+    }
+
+
 def convert_claude_to_rollout(path, thread_id, info, cli_version):
     rows = [
         event(
@@ -235,6 +292,190 @@ def convert_claude_to_rollout(path, thread_id, info, cli_version):
             rows.extend(agent_text_lines(ts, str(obj["content"]).strip()))
     rows.extend(agent_text_lines(info["last"], "<EXTERNAL SESSION IMPORTED>"))
     return rows
+
+
+def safe_slug(text, limit=64):
+    text = clean_text(text, limit)
+    text = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", text, flags=re.UNICODE).strip("-._")
+    return text[:limit] or "claude-session"
+
+
+def markdown_summary(thread_id, source_path, original_copy, summary_path, thread_row, summary):
+    tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"]) or "无明显工具记录"
+    lines = [
+        f"# {summary['purpose']}",
+        "",
+        f"- Thread ID: `{thread_id}`",
+        f"- 原 Claude JSONL: `{source_path}`",
+        f"- 归档副本: `{original_copy}`",
+        f"- Codex rollout: `{thread_row['rollout_path']}`",
+        f"- 时间: `{iso_z(summary['first'])}` 到 `{iso_z(summary['last'])}`",
+        f"- CWD: `{summary['cwd']}`",
+        f"- 消息统计: user {summary['user_count']} / assistant {summary['assistant_count']} / JSONL rows {summary['total']}",
+        f"- 常见工具: {tools}",
+        "",
+        "## 这个会话主要在做什么",
+        "",
+        clean_text(summary["title"], 500) or summary["purpose"],
+        "",
+    ]
+    if summary["summary_blocks"]:
+        lines += ["## Claude 原始摘要片段", ""]
+        for item in summary["summary_blocks"]:
+            lines += [f"- {item}", ""]
+    if summary["first_user_messages"]:
+        lines += ["## 开始时的用户请求", ""]
+        for item in summary["first_user_messages"]:
+            lines += [f"- {item}", ""]
+    if summary["recent_user_messages"]:
+        lines += ["## 最近的用户请求", ""]
+        for item in summary["recent_user_messages"]:
+            lines += [f"- {item}", ""]
+    lines += [
+        "## 使用建议",
+        "",
+        "这个 Codex 会话是 Claude 导入归档入口。需要完整上下文时，按上面的原始 JSONL 或归档副本路径定向读取，不要把整段历史一次性塞进新模型上下文。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_path, original_copy, cli_version):
+    first = summary["first"]
+    last = summary["last"]
+    meta = {
+        "session_id": thread_id,
+        "id": thread_id,
+        "timestamp": iso_z(first),
+        "cwd": summary["cwd"],
+        "originator": "Codex Desktop",
+        "cli_version": cli_version,
+        "source": "vscode",
+        "model_provider": "openai",
+        "external_agent_source": "claude",
+        "external_agent_source_path": str(source_path),
+        "external_agent_archive_summary_path": str(summary_path),
+        "external_agent_archive_original_copy": str(original_copy),
+        "external_agent_compacted": True,
+    }
+    user_text = f"打开 Claude 导入会话归档：{summary['purpose']}"
+    assistant_text = "\n".join(
+        [
+            f"Claude 导入会话已整理为归档入口：{summary['purpose']}",
+            "",
+            f"- 详细内容参考原 Claude JSONL: `{source_path}`",
+            f"- 归档副本: `{original_copy}`",
+            f"- 结构化摘要: `{summary_path}`",
+            f"- 时间: `{iso_z(first)}` 到 `{iso_z(last)}`",
+            f"- 原消息规模: user {summary['user_count']} / assistant {summary['assistant_count']} / rows {summary['total']}",
+            "",
+            "为避免超出 Codex 上下文窗口，这里不再内联完整 Claude 历史。需要继续工作时，请新开 Codex 会话，并按上面的摘要或原始 JSONL 路径定向读取相关片段。",
+        ]
+    )
+    return [
+        event(first, "session_meta", meta),
+        *user_text_lines(first, user_text),
+        *agent_text_lines(last, assistant_text),
+    ]
+
+
+def archive_and_compact_imports(con, records, codex_home, archive_root, fallback_home, cli_version, dry_run):
+    require_threads_columns(con, ["id", "rollout_path", "title", "preview", "created_at", "updated_at", "recency_at"])
+    originals_dir = archive_root / "originals"
+    summaries_dir = archive_root / "summaries"
+    rollout_backups_dir = archive_root / "rollout_backups"
+    if not dry_run:
+        archive_root.mkdir(parents=True, exist_ok=True)
+        originals_dir.mkdir(parents=True, exist_ok=True)
+        summaries_dir.mkdir(parents=True, exist_ok=True)
+        rollout_backups_dir.mkdir(parents=True, exist_ok=True)
+
+    index_rows = []
+    changed = 0
+    for record in records:
+        thread_id = record.get("imported_thread_id")
+        source_path = Path(str(record.get("source_path") or "")).expanduser()
+        if not thread_id or not source_path.exists():
+            continue
+        row = con.execute(
+            "SELECT id, rollout_path, title, preview FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        if not row:
+            continue
+        thread_row = {"id": row[0], "rollout_path": row[1], "title": row[2], "preview": row[3]}
+        rollout_path = Path(thread_row["rollout_path"])
+        summary = summarize_claude_session(source_path, fallback_home)
+        day = summary["first"].strftime("%Y/%m/%d")
+        slug = safe_slug(summary["purpose"])
+        original_copy = originals_dir / day / f"{thread_id}-{source_path.name}"
+        summary_path = summaries_dir / day / f"{thread_id}-{slug}.md"
+        rollout_backup = rollout_backups_dir / day / rollout_path.name
+        index_rows.append(
+            {
+                "thread_id": thread_id,
+                "purpose": summary["purpose"],
+                "title": summary["title"],
+                "first": iso_z(summary["first"]),
+                "last": iso_z(summary["last"]),
+                "source_path": str(source_path),
+                "original_copy": str(original_copy),
+                "summary_path": str(summary_path),
+                "rollout_path": str(rollout_path),
+                "user_count": summary["user_count"],
+                "assistant_count": summary["assistant_count"],
+                "rows": summary["total"],
+            }
+        )
+        if dry_run:
+            continue
+        original_copy.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        rollout_backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, original_copy)
+        if rollout_path.exists() and not rollout_backup.exists():
+            shutil.copy2(rollout_path, rollout_backup)
+        summary_path.write_text(
+            markdown_summary(thread_id, source_path, original_copy, summary_path, thread_row, summary),
+            encoding="utf-8",
+        )
+        compact_rows = compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_path, original_copy, cli_version)
+        with rollout_path.open("w", encoding="utf-8") as handle:
+            for compact_row in compact_rows:
+                handle.write(json.dumps(compact_row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        first_ms = unix_ms(summary["first"])
+        last_ms = unix_ms(summary["last"])
+        cursor = con.execute(
+            """
+            UPDATE threads
+               SET title = ?,
+                   preview = ?,
+                   created_at = ?,
+                   updated_at = ?,
+                   created_at_ms = ?,
+                   updated_at_ms = ?,
+                   recency_at = ?,
+                   recency_at_ms = ?
+             WHERE id = ?
+            """,
+            (
+                summary["purpose"],
+                f"Claude导入归档: {summary['purpose']}。详细内容参考 {summary_path}",
+                first_ms // 1000,
+                last_ms // 1000,
+                first_ms,
+                last_ms,
+                last_ms // 1000,
+                last_ms,
+                thread_id,
+            ),
+        )
+        changed += max(cursor.rowcount, 0)
+
+    if not dry_run:
+        index_path = archive_root / "index.json"
+        index_path.write_text(json.dumps(index_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return len(index_rows), changed
 
 
 def load_index(index_path):
@@ -392,6 +633,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fix-existing-timestamps", action="store_true")
     parser.add_argument("--import-missing", action="store_true")
+    parser.add_argument("--archive-and-compact-imports", action="store_true")
+    parser.add_argument("--archive-root", default="~/.codex/imported_claude_archive")
     parser.add_argument("--include-subagents", action="store_true")
     parser.add_argument("--no-backup", action="store_true")
     args = parser.parse_args()
@@ -416,13 +659,29 @@ def main():
 
     print(f"candidate_sessions={len(all_paths)} already_indexed={len(imported_paths)} missing={len(missing)}")
     if args.dry_run:
+        if args.archive_and_compact_imports:
+            con = sqlite3.connect(state_db)
+            try:
+                archived, _ = archive_and_compact_imports(
+                    con,
+                    records,
+                    codex_home,
+                    expand(args.archive_root),
+                    fallback_home,
+                    args.cli_version,
+                    True,
+                )
+            finally:
+                con.close()
+            print(f"would_archive_and_compact_imported_sessions={archived}")
+            return
         for path in missing[:20]:
             info = analyze_claude_session(path, fallback_home)
             print(f"{iso_z(info['first'])} {iso_z(info['last'])} {info['title']} {path}")
         return
 
-    if not args.fix_existing_timestamps and not args.import_missing:
-        raise SystemExit("Choose --dry-run, --fix-existing-timestamps, or --import-missing.")
+    if not args.fix_existing_timestamps and not args.import_missing and not args.archive_and_compact_imports:
+        raise SystemExit("Choose --dry-run, --fix-existing-timestamps, --import-missing, or --archive-and-compact-imports.")
 
     backup_dir = None
     if not args.no_backup:
@@ -434,10 +693,22 @@ def main():
         con.execute("BEGIN IMMEDIATE")
         fixed = 0
         imported = 0
+        archived = 0
+        archive_updates = 0
         if args.fix_existing_timestamps:
             fixed = fix_existing_timestamps(con, records, fallback_home)
         if args.import_missing:
             imported = import_missing_sessions(con, index, missing, sessions_dir, fallback_home, args.cli_version)
+        if args.archive_and_compact_imports:
+            archived, archive_updates = archive_and_compact_imports(
+                con,
+                records,
+                codex_home,
+                expand(args.archive_root),
+                fallback_home,
+                args.cli_version,
+                False,
+            )
         con.commit()
     except Exception:
         con.rollback()
@@ -450,6 +721,8 @@ def main():
 
     print(f"fixed_existing_thread_updates={fixed}")
     print(f"imported_missing_sessions={imported}")
+    print(f"archived_imported_sessions={archived}")
+    print(f"archive_thread_updates={archive_updates}")
 
 
 if __name__ == "__main__":

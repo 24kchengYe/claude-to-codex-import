@@ -36,7 +36,13 @@ Use this skill when a macOS user wants to migrate local Claude Code history into
    ```bash
    python3 scripts/import_claude_sessions_to_codex.py --import-missing
    ```
-5. Verify parity:
+5. For long imported Claude sessions, convert them into compact archive entries:
+   ```bash
+   python3 scripts/import_claude_sessions_to_codex.py --archive-and-compact-imports --dry-run
+   python3 scripts/import_claude_sessions_to_codex.py --archive-and-compact-imports
+   ```
+   This keeps Codex's thread list clickable while storing full original JSONL files and Markdown summaries under `~/.codex/imported_claude_archive/`.
+6. Verify parity:
    ```bash
    codex doctor --json
    ```
