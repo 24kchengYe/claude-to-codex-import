@@ -73,7 +73,23 @@ def text_from_content(content):
 
 
 def clean_text(value, limit=None):
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = str(value or "")
+    text = re.sub(
+        r"(['\"]data['\"]\s*:\s*['\"])[A-Za-z0-9+/=\r\n]{200,}(['\"])",
+        r"\1[base64 image data omitted]\2",
+        text,
+    )
+    text = re.sub(
+        r"(data:image/[A-Za-z0-9.+-]+;base64,)[A-Za-z0-9+/=\r\n]{200,}",
+        r"\1[base64 image data omitted]",
+        text,
+    )
+    text = re.sub(
+        r"(/9j/|iVBOR)[A-Za-z0-9+/=\r\n]{200,}",
+        r"\1[base64 image data omitted]",
+        text,
+    )
+    text = re.sub(r"\s+", " ", text).strip()
     if limit and len(text) > limit:
         return text[: limit - 1].rstrip() + "..."
     return text
@@ -395,9 +411,64 @@ def md_path(path):
     return Path(path).expanduser().as_posix()
 
 
+def context_reference_paths(source_path, summary, fallback_home):
+    refs = []
+
+    def add(label, path):
+        if path is None:
+            return
+        p = Path(path).expanduser()
+        key = (label, str(p))
+        if key in {(item["label"], item["path"]) for item in refs}:
+            return
+        refs.append({"label": label, "path": str(p), "exists": p.exists()})
+
+    source = Path(source_path).expanduser()
+    add("Claude 原始会话所在目录", source.parent)
+    add("Claude 项目 sessions-index.json", source.parent / "sessions-index.json")
+
+    cwd_text = summary.get("cwd")
+    if cwd_text:
+        cwd = Path(cwd_text).expanduser()
+        add("会话 CWD", cwd)
+        current = cwd
+        for _ in range(8):
+            add("项目 CLAUDE.md", current / "CLAUDE.md")
+            add("项目 AGENTS.md", current / "AGENTS.md")
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+    home = Path(fallback_home).expanduser()
+    claude_home = home / ".claude"
+    add("Claude 用户目录", claude_home)
+    add("Claude 用户 memory: CLAUDE.md", claude_home / "CLAUDE.md")
+    add("Claude settings.json", claude_home / "settings.json")
+    add("Claude settings.local.json", claude_home / "settings.local.json")
+    add("Claude skills 目录", claude_home / "skills")
+    add("Claude commands 目录", claude_home / "commands")
+    add("Claude projects 目录", claude_home / "projects")
+    return refs
+
+
+def context_reference_markdown(refs):
+    if not refs:
+        return []
+    lines = ["## 可追溯环境入口", ""]
+    lines.append("这些是 Claude 当时可能依赖的本地上下文入口；这里只保留路径，Codex 需要时再定向读取。")
+    lines.append("")
+    for item in refs:
+        status = "存在" if item["exists"] else "未发现"
+        lines.append(f"- {item['label']} ({status}): `{md_path(item['path'])}`")
+    lines.append("")
+    return lines
+
+
 def markdown_summary(thread_id, source_path, original_copy, summary_path, thread_row, summary):
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"]) or "无明显工具记录"
     modules = [json.loads(item) for item in summary["modules"]]
+    context_refs = context_reference_paths(source_path, summary, Path.home())
     lines = [
         f"# {summary['purpose']}",
         "",
@@ -455,6 +526,7 @@ def markdown_summary(thread_id, source_path, original_copy, summary_path, thread
         for item in summary["paths"]:
             lines += [f"- `{item}`"]
         lines += [""]
+    lines += context_reference_markdown(context_refs)
     lines += [
         "## 使用建议",
         "",
@@ -489,6 +561,11 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"][:8]) or "无明显工具记录"
     modules = [json.loads(item) for item in summary["modules"][:5]]
     module_text = "\n".join(f"- {item['title']}: {clean_text(item['body'], 500)}" for item in modules) or "- 无明确模块拆解"
+    context_refs = context_reference_paths(source_path, summary, Path.home())
+    context_text = "\n".join(
+        f"- {item['label']} ({'存在' if item['exists'] else '未发现'}): {md_path(item['path'])}"
+        for item in context_refs[:12]
+    ) or "- 无"
     turn_preview = "\n".join(
         f"- Turn {item['index']}: {clean_text(item['user'], 260)} -> {clean_text(item['assistant'], 260)}"
         for item in summary["turns"][:8]
@@ -524,6 +601,9 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
             f"- [归档副本]({md_path(original_copy)})",
             f"- [结构化摘要]({md_path(summary_path)})",
             f"- 时间: `{iso_z(first)}` 到 `{iso_z(last)}`",
+            "",
+            "## 可追溯环境入口",
+            context_text,
             "",
             "为避免超出 Codex 上下文窗口，这里不再内联完整 Claude 历史。需要继续工作时，请新开 Codex 会话，并按上面的摘要或原始 JSONL 路径定向读取相关片段。",
         ]
@@ -568,12 +648,7 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
         old_index_item = existing_index.get(thread_id)
         manual_title = bool(old_index_item and thread_row["title"] != old_index_item.get("purpose"))
         if manual_title and not overwrite_manual_titles:
-            preserved = dict(old_index_item)
-            preserved["manual_title"] = thread_row["title"]
-            preserved["skipped_reason"] = "manual_title_preserved"
-            index_rows.append(preserved)
             skipped_manual_titles += 1
-            continue
         rollout_path = Path(thread_row["rollout_path"])
         summary = summarize_claude_session(source_path, fallback_home)
         day = summary["first"].strftime("%Y/%m/%d")
@@ -581,22 +656,24 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
         original_copy = originals_dir / day / f"{thread_id}-{source_path.name}"
         summary_path = summaries_dir / day / f"{thread_id}-{slug}.md"
         rollout_backup = rollout_backups_dir / day / rollout_path.name
-        index_rows.append(
-            {
-                "thread_id": thread_id,
-                "purpose": summary["purpose"],
-                "title": summary["title"],
-                "first": iso_z(summary["first"]),
-                "last": iso_z(summary["last"]),
-                "source_path": str(source_path),
-                "original_copy": str(original_copy),
-                "summary_path": str(summary_path),
-                "rollout_path": str(rollout_path),
-                "user_count": summary["user_count"],
-                "assistant_count": summary["assistant_count"],
-                "rows": summary["total"],
-            }
-        )
+        index_row = {
+            "thread_id": thread_id,
+            "purpose": summary["purpose"],
+            "title": summary["title"],
+            "first": iso_z(summary["first"]),
+            "last": iso_z(summary["last"]),
+            "source_path": str(source_path),
+            "original_copy": str(original_copy),
+            "summary_path": str(summary_path),
+            "rollout_path": str(rollout_path),
+            "user_count": summary["user_count"],
+            "assistant_count": summary["assistant_count"],
+            "rows": summary["total"],
+        }
+        if manual_title and not overwrite_manual_titles:
+            index_row["manual_title"] = thread_row["title"]
+            index_row["title_update"] = "manual_title_preserved"
+        index_rows.append(index_row)
         if dry_run:
             continue
         original_copy.parent.mkdir(parents=True, exist_ok=True)
@@ -629,7 +706,7 @@ def archive_and_compact_imports(con, records, codex_home, archive_root, fallback
              WHERE id = ?
             """,
             (
-                summary["purpose"],
+                thread_row["title"] if manual_title and not overwrite_manual_titles else summary["purpose"],
                 f"Claude导入归档: {summary['purpose']}。详细内容参考 {summary_path}",
                 first_ms // 1000,
                 last_ms // 1000,
