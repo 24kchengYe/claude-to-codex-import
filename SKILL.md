@@ -1,11 +1,11 @@
 ---
 name: claude-to-codex-import
-description: Import local Claude Code conversations into Codex on macOS, including repairing Codex Desktop imported timestamps, finding all Claude project JSONL sessions, backing up ~/.codex, updating state_5.sqlite metadata, and generating Codex rollout JSONL files.
+description: Import local Claude Code conversations into Codex on macOS or Windows, including repairing Codex Desktop imported timestamps, finding all Claude project JSONL sessions, backing up Codex state, updating state_5.sqlite metadata, compacting long imported rollouts into archive entries, and preserving original Claude JSONL files.
 ---
 
 # Claude to Codex Import
 
-Use this skill when a macOS user wants to migrate local Claude Code history into Codex, fix Codex Desktop's imported session timestamps, or explain why the built-in importer missed older Claude sessions.
+Use this skill when a macOS or Windows user wants to migrate local Claude Code history into Codex, fix Codex Desktop's imported session timestamps, compact long imported conversations, or explain why the built-in importer missed older Claude sessions.
 
 ## What to Know
 
@@ -13,13 +13,14 @@ Use this skill when a macOS user wants to migrate local Claude Code history into
 - Codex Desktop state normally lives under `~/.codex/state_5.sqlite`.
 - Codex conversation files normally live under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 - Codex Desktop's external import index is `~/.codex/external_agent_session_imports.json`.
+- On Windows, `~` usually expands to `C:\Users\<user>` in PowerShell/Python, so the same defaults target `C:\Users\<user>\.claude` and `C:\Users\<user>\.codex`.
 - The built-in Codex importer may import only recent Claude sessions. To import all local history, enumerate Claude JSONL files directly.
 - Imported Codex timestamps should come from Claude JSONL line-level `timestamp` fields: earliest line for creation time, latest line for update/recency time.
 - Very long imported Claude sessions are archives, not good continuation targets. Opening them as active Codex threads can exceed the model context window because Codex may load the full converted rollout.
 
 ## Workflow
 
-1. Confirm the environment is macOS and inspect paths:
+1. Confirm the environment and inspect paths:
    - `~/.claude/projects`
    - `~/.codex/state_5.sqlite`
    - `~/.codex/external_agent_session_imports.json`
@@ -47,6 +48,22 @@ Use this skill when a macOS user wants to migrate local Claude Code history into
    codex doctor --json
    ```
    Check that rollout database/file parity is ok and no rollout files are missing.
+
+## Windows Notes
+
+- Run from PowerShell with Python 3 installed:
+  ```powershell
+  python .\scripts\import_claude_sessions_to_codex.py --dry-run
+  python .\scripts\import_claude_sessions_to_codex.py --fix-existing-timestamps
+  python .\scripts\import_claude_sessions_to_codex.py --import-missing
+  python .\scripts\import_claude_sessions_to_codex.py --archive-and-compact-imports
+  ```
+- If Claude or Codex is installed in a nonstandard location, pass explicit paths:
+  ```powershell
+  python .\scripts\import_claude_sessions_to_codex.py --claude-projects "$env:USERPROFILE\.claude\projects" --codex-home "$env:USERPROFILE\.codex" --dry-run
+  ```
+- Close Codex Desktop before write operations on Windows. SQLite locks are more likely if the app is open.
+- If previous Windows imports failed after opening old conversations, suspect long-rollout context loading. Use `--archive-and-compact-imports` so imported Claude sessions are clickable archive entries instead of full active threads.
 
 ## Safety Rules
 

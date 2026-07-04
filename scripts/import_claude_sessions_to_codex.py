@@ -318,15 +318,19 @@ def safe_slug(text, limit=64):
     return text[:limit] or "claude-session"
 
 
+def md_path(path):
+    return Path(path).expanduser().as_posix()
+
+
 def markdown_summary(thread_id, source_path, original_copy, summary_path, thread_row, summary):
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"]) or "无明显工具记录"
     lines = [
         f"# {summary['purpose']}",
         "",
         f"- Thread ID: `{thread_id}`",
-        f"- 原 Claude JSONL: `{source_path}`",
-        f"- 归档副本: `{original_copy}`",
-        f"- Codex rollout: `{thread_row['rollout_path']}`",
+        f"- 原 Claude JSONL: `{md_path(source_path)}`",
+        f"- 归档副本: `{md_path(original_copy)}`",
+        f"- Codex rollout: `{md_path(thread_row['rollout_path'])}`",
         f"- 时间: `{iso_z(summary['first'])}` 到 `{iso_z(summary['last'])}`",
         f"- CWD: `{summary['cwd']}`",
         f"- 消息统计: user {summary['user_count']} / assistant {summary['assistant_count']} / JSONL rows {summary['total']}",
@@ -402,9 +406,9 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
             f"- 原消息规模: user {summary['user_count']} / assistant {summary['assistant_count']} / rows {summary['total']}",
             "",
             "## 文件路径",
-            f"- [详细内容参考原 Claude JSONL]({source_path})",
-            f"- [归档副本]({original_copy})",
-            f"- [结构化摘要]({summary_path})",
+            f"- [详细内容参考原 Claude JSONL]({md_path(source_path)})",
+            f"- [归档副本]({md_path(original_copy)})",
+            f"- [结构化摘要]({md_path(summary_path)})",
             f"- 时间: `{iso_z(first)}` 到 `{iso_z(last)}`",
             "",
             "为避免超出 Codex 上下文窗口，这里不再内联完整 Claude 历史。需要继续工作时，请新开 Codex 会话，并按上面的摘要或原始 JSONL 路径定向读取相关片段。",
@@ -527,7 +531,7 @@ def load_index(index_path):
 def claude_session_paths(claude_projects, include_subagents):
     paths = sorted(claude_projects.rglob("*.jsonl"))
     if not include_subagents:
-        paths = [path for path in paths if "/subagents/" not in str(path)]
+        paths = [path for path in paths if "subagents" not in path.parts]
     return [path for path in paths if path.name != "journal.jsonl"]
 
 
