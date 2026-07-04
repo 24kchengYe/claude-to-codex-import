@@ -197,6 +197,9 @@ def summarize_claude_session(path, fallback_home):
     info = analyze_claude_session(path, fallback_home)
     user_messages = []
     assistant_messages = []
+    turns = []
+    pending_user = None
+    assistant_after_user = []
     all_texts = []
     summaries = []
     tool_names = {}
@@ -209,6 +212,10 @@ def summarize_claude_session(path, fallback_home):
         if obj_type == "user" and isinstance(obj.get("message"), dict):
             text = clean_text(text_from_content(obj["message"].get("content")), 6000)
             if text:
+                if pending_user is not None:
+                    turns.append({"user": pending_user, "assistant": " ".join(assistant_after_user)})
+                pending_user = text
+                assistant_after_user = []
                 user_messages.append(text)
                 all_texts.append(text)
         elif obj_type == "assistant" and isinstance(obj.get("message"), dict):
@@ -226,7 +233,11 @@ def summarize_claude_session(path, fallback_home):
                 text = clean_text(text_from_content(content), 6000)
             if text:
                 assistant_messages.append(text)
+                if pending_user is not None:
+                    assistant_after_user.append(text)
                 all_texts.append(text)
+    if pending_user is not None:
+        turns.append({"user": pending_user, "assistant": " ".join(assistant_after_user)})
 
     purpose = clean_text(info["title"], 28)
     if not purpose or purpose == path.stem:
@@ -240,6 +251,7 @@ def summarize_claude_session(path, fallback_home):
         "detail": build_detail_summary(info["title"], summaries, user_messages),
         "modules": extract_modules(summaries + user_messages),
         "paths": extract_paths(all_texts),
+        "turns": compact_turns(turns),
         "user_count": len(user_messages),
         "assistant_count": len(assistant_messages),
         "summary_blocks": summaries[:8],
@@ -288,6 +300,23 @@ def extract_paths(texts):
             if len(value) >= 8:
                 paths.append(value)
     return unique_keep_order(paths, 100)
+
+
+def compact_turns(turns):
+    out = []
+    for index, turn in enumerate(turns, start=1):
+        user = clean_text(turn.get("user"), 2200)
+        assistant = clean_text(turn.get("assistant"), 1800)
+        if not user:
+            continue
+        out.append(
+            {
+                "index": index,
+                "user": user,
+                "assistant": assistant or "这一轮没有可提取的助手文本回复，可能主要是工具结果、后台任务或会话中断。",
+            }
+        )
+    return out
 
 
 def convert_claude_to_rollout(path, thread_id, info, cli_version):
@@ -406,6 +435,21 @@ def markdown_summary(thread_id, source_path, original_copy, summary_path, thread
         lines += ["## 最近的助手回复", ""]
         for item in summary["recent_assistant_messages"]:
             lines += [f"- {item}", ""]
+    if summary["turns"]:
+        lines += ["## 用户 Prompt 时间线", ""]
+        for item in summary["turns"]:
+            lines += [
+                f"### Turn {item['index']}",
+                "",
+                "**用户 prompt**",
+                "",
+                item["user"],
+                "",
+                "**助手完成/回复摘要**",
+                "",
+                item["assistant"],
+                "",
+            ]
     if summary["paths"]:
         lines += ["## 会话中提到的路径", ""]
         for item in summary["paths"]:
@@ -445,6 +489,10 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
     tools = ", ".join(f"{name}({count})" for name, count in summary["tool_names"][:8]) or "无明显工具记录"
     modules = [json.loads(item) for item in summary["modules"][:5]]
     module_text = "\n".join(f"- {item['title']}: {clean_text(item['body'], 500)}" for item in modules) or "- 无明确模块拆解"
+    turn_preview = "\n".join(
+        f"- Turn {item['index']}: {clean_text(item['user'], 260)} -> {clean_text(item['assistant'], 260)}"
+        for item in summary["turns"][:8]
+    ) or "- 无可提取 turn"
     assistant_text = "\n".join(
         [
             f"Claude 导入会话已整理为归档入口：{summary['purpose']}",
@@ -463,6 +511,9 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
             "",
             "## 最近的用户请求",
             recent_requests,
+            "",
+            "## 用户 Prompt 时间线预览",
+            turn_preview,
             "",
             "## 工具和规模",
             f"- 常见工具: {tools}",

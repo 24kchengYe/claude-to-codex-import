@@ -37,7 +37,7 @@ Close Codex Desktop before write operations, especially on Windows, to avoid SQL
 Each imported Claude session has three layers:
 
 - Compact Codex thread entry: short enough to open without exhausting context.
-- Rich Markdown sidecar summary: objectives, module/phase breakdowns, decisions, paths, tools, errors/fixes, first requests, recent requests, and recent assistant outputs.
+- Rich Markdown sidecar summary: objectives, module/phase breakdowns, decisions, paths, tools, errors/fixes, first requests, recent requests, recent assistant outputs, and a turn-by-turn user prompt timeline.
 - Original JSONL copy: complete raw Claude session for exact recovery.
 
 The archive lives at:
@@ -51,3 +51,13 @@ The archive lives at:
 ```
 
 Manually edited Codex thread titles are preserved by default. Use `--overwrite-manual-titles` only when regenerated titles should replace UI edits.
+
+## Summary Detail
+
+The Markdown summary is intentionally much longer than the compact Codex thread. It includes a `用户 Prompt 时间线` section:
+
+- each user prompt becomes a numbered turn,
+- the assistant text that follows that prompt is attached as the completion/result summary,
+- tool-heavy or interrupted turns are still retained with a placeholder when no assistant prose is available.
+
+This gives later Codex sessions enough context to understand what happened without loading the entire raw Claude JSONL into the active model context.
