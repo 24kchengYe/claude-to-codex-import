@@ -15,6 +15,7 @@ Use this skill when a macOS user wants to migrate local Claude Code history into
 - Codex Desktop's external import index is `~/.codex/external_agent_session_imports.json`.
 - The built-in Codex importer may import only recent Claude sessions. To import all local history, enumerate Claude JSONL files directly.
 - Imported Codex timestamps should come from Claude JSONL line-level `timestamp` fields: earliest line for creation time, latest line for update/recency time.
+- Very long imported Claude sessions are archives, not good continuation targets. Opening them as active Codex threads can exceed the model context window because Codex may load the full converted rollout.
 
 ## Workflow
 
@@ -48,6 +49,7 @@ Use this skill when a macOS user wants to migrate local Claude Code history into
 - Exclude `*/subagents/*` and `journal.jsonl` unless the user explicitly asks to include them.
 - If `state_5.sqlite` schema differs, inspect `PRAGMA table_info(threads)` before writing and adapt conservatively.
 - If `gh` or network commands are needed to publish a skill, verify authentication before assuming GitHub access works.
+- For long imported sessions, prefer starting a fresh Codex thread and reading the Claude source JSONL selectively instead of continuing the imported rollout directly.
 
 ## Script
 

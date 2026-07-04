@@ -283,7 +283,7 @@ def fix_existing_timestamps(con, records, fallback_home):
         info = analyze_claude_session(path, fallback_home)
         first_ms = unix_ms(info["first"])
         last_ms = unix_ms(info["last"])
-        con.execute(
+        cursor = con.execute(
             """
             UPDATE threads
                SET created_at = ?,
@@ -296,7 +296,7 @@ def fix_existing_timestamps(con, records, fallback_home):
             """,
             (first_ms // 1000, last_ms // 1000, first_ms, last_ms, last_ms // 1000, last_ms, thread_id),
         )
-        changed += con.total_changes
+        changed += max(cursor.rowcount, 0)
     return changed
 
 
