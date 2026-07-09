@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import local Claude Code JSONL sessions into Codex Desktop state on macOS."""
+"""Import local Claude Code JSONL sessions into Codex Desktop state on macOS or Windows."""
 
 import argparse
 import datetime as dt
@@ -615,6 +615,244 @@ def compact_rollout_rows(thread_id, source_path, thread_row, summary, summary_pa
     ]
 
 
+def strip_extended_prefix(path_text):
+    text = str(path_text or "")
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
+
+
+def codex_db_cwd(path_text):
+    text = strip_extended_prefix(path_text)
+    if re.match(r"^[A-Za-z]:\\", text):
+        return "\\\\?\\" + text
+    return text
+
+
+def continuation_thread_id(old_thread_id):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"claude-to-codex-continuation-v1:{old_thread_id}"))
+
+
+def continuation_rollout_path(codex_home, ts, thread_id):
+    day_dir = codex_home / "sessions" / ts.strftime("%Y/%m/%d")
+    name = f"rollout-{ts.strftime('%Y-%m-%dT%H-%M-%S')}-{thread_id}.jsonl"
+    return day_dir / name
+
+
+def continuation_prompt(old_thread_id, title, cwd, summary_path, original_copy, source_path):
+    return "\n".join(
+        [
+            "继续一个从 Claude 迁移到 Codex 的会话。",
+            "",
+            f"旧归档 threadId: {old_thread_id}",
+            f"旧归档标题: {title}",
+            f"工作目录: {strip_extended_prefix(cwd)}",
+            f"结构化摘要路径: {summary_path}",
+            f"归档 Claude JSONL 副本: {original_copy}",
+            f"原始 Claude JSONL: {source_path}",
+            "",
+            "请先读取结构化摘要路径，理解此前任务状态，再继续用户后续请求。",
+            "不要把旧归档当作可直接 resume 的 Codex thread；旧归档只用于查看历史。",
+        ]
+    )
+
+
+def continuation_rollout_rows(thread_id, old_thread_id, row, prompt, ts, cli_version):
+    cwd = strip_extended_prefix(row["cwd"])
+    title = row["title"]
+    assistant_text = "\n".join(
+        [
+            "已创建 Claude 迁移会话的 Codex 原生续写入口。",
+            "",
+            f"- 旧归档 threadId: {old_thread_id}",
+            f"- 旧归档标题: {title}",
+            f"- 工作目录: {cwd}",
+            "",
+            "后续请在这个会话里继续；旧归档只用于查看历史。",
+        ]
+    )
+    meta = {
+        "session_id": thread_id,
+        "id": thread_id,
+        "timestamp": iso_z(ts),
+        "cwd": cwd,
+        "originator": "codex-tui",
+        "cli_version": cli_version,
+        "source": "cli",
+        "thread_source": "user",
+        "model_provider": "openai",
+        "claude_archive_thread_id": old_thread_id,
+    }
+    return [
+        event(ts, "session_meta", meta),
+        *user_text_lines(ts, prompt),
+        *agent_text_lines(ts, assistant_text),
+    ]
+
+
+def create_continuation_threads(con, index_rows, codex_home, cli_version, dry_run, overwrite, recency_mode, only_thread_id):
+    require_threads_columns(
+        con,
+        [
+            "id",
+            "rollout_path",
+            "created_at",
+            "updated_at",
+            "source",
+            "model_provider",
+            "cwd",
+            "title",
+            "sandbox_policy",
+            "approval_mode",
+            "tokens_used",
+            "has_user_event",
+            "archived",
+            "cli_version",
+            "first_user_message",
+            "created_at_ms",
+            "updated_at_ms",
+            "thread_source",
+            "preview",
+            "recency_at",
+            "recency_at_ms",
+        ],
+    )
+    now = dt.datetime.now(dt.timezone.utc)
+    planned = 0
+    created = 0
+    skipped_existing = 0
+    skipped_missing_summary = 0
+    for item in index_rows:
+        old_thread_id = item.get("thread_id")
+        if only_thread_id and old_thread_id != only_thread_id:
+            continue
+        summary_path = Path(str(item.get("summary_path") or ""))
+        if not old_thread_id or not summary_path.exists():
+            skipped_missing_summary += 1
+            continue
+        new_thread_id = continuation_thread_id(old_thread_id)
+        exists = con.execute("SELECT 1 FROM threads WHERE id = ?", (new_thread_id,)).fetchone()
+        if exists and not overwrite:
+            skipped_existing += 1
+            continue
+        old_row = con.execute(
+            "SELECT cwd, title, created_at, updated_at, created_at_ms, updated_at_ms, recency_at, recency_at_ms FROM threads WHERE id = ?",
+            (old_thread_id,),
+        ).fetchone()
+        cwd = old_row[0] if old_row and old_row[0] else item.get("cwd") or str(Path.home())
+        title = old_row[1] if old_row and old_row[1] else item.get("purpose") or item.get("title") or old_thread_id
+        first = parse_iso(item.get("first")) or now
+        last = parse_iso(item.get("last")) or first
+        ts = now if recency_mode == "now" else last
+        rollout_path = continuation_rollout_path(codex_home, ts, new_thread_id)
+        prompt = continuation_prompt(
+            old_thread_id,
+            title,
+            cwd,
+            summary_path,
+            item.get("original_copy") or "",
+            item.get("source_path") or "",
+        )
+        planned += 1
+        if dry_run:
+            print(f"would_create_continuation {new_thread_id} <- {old_thread_id} {title} {rollout_path}")
+            continue
+        rollout_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = continuation_rollout_rows(
+            new_thread_id,
+            old_thread_id,
+            {"cwd": cwd, "title": title},
+            prompt,
+            ts,
+            cli_version,
+        )
+        with rollout_path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        created_ms = unix_ms(first)
+        updated_ms = unix_ms(ts)
+        new_title = f"续写: {title}"[:200]
+        preview = f"Claude 迁移续写入口。先读摘要: {summary_path}"
+        if exists:
+            con.execute(
+                """
+                UPDATE threads
+                   SET rollout_path = ?,
+                       created_at = ?,
+                       updated_at = ?,
+                       source = 'cli',
+                       model_provider = 'openai',
+                       cwd = ?,
+                       title = ?,
+                       sandbox_policy = '{"type":"disabled"}',
+                       approval_mode = 'never',
+                       tokens_used = 0,
+                       has_user_event = 1,
+                       archived = 0,
+                       archived_at = NULL,
+                       cli_version = ?,
+                       first_user_message = ?,
+                       memory_mode = 'enabled',
+                       model = 'gpt-5.5',
+                       created_at_ms = ?,
+                       updated_at_ms = ?,
+                       thread_source = 'user',
+                       preview = ?,
+                       recency_at = ?,
+                       recency_at_ms = ?
+                 WHERE id = ?
+                """,
+                (
+                    str(rollout_path),
+                    created_ms // 1000,
+                    updated_ms // 1000,
+                    codex_db_cwd(cwd),
+                    new_title,
+                    cli_version,
+                    prompt[:4000],
+                    created_ms,
+                    updated_ms,
+                    preview[:4000],
+                    updated_ms // 1000,
+                    updated_ms,
+                    new_thread_id,
+                ),
+            )
+        else:
+            con.execute(
+                """
+                INSERT INTO threads (
+                id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
+                git_sha, git_branch, git_origin_url, cli_version, first_user_message,
+                agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path,
+                created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms
+                ) VALUES (
+                ?, ?, ?, ?, 'cli', 'openai', ?, ?, '{"type":"disabled"}', 'never',
+                0, 1, 0, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, 'enabled', 'gpt-5.5', NULL,
+                NULL, ?, ?, 'user', ?, ?, ?
+                )
+                """,
+                (
+                    new_thread_id,
+                    str(rollout_path),
+                    created_ms // 1000,
+                    updated_ms // 1000,
+                    codex_db_cwd(cwd),
+                    new_title,
+                    cli_version,
+                    prompt[:4000],
+                    created_ms,
+                    updated_ms,
+                    preview[:4000],
+                    updated_ms // 1000,
+                    updated_ms,
+                ),
+            )
+        created += 1
+    return planned, created, skipped_existing, skipped_missing_summary
+
+
 def archive_and_compact_imports(con, records, codex_home, archive_root, fallback_home, cli_version, dry_run, overwrite_manual_titles):
     require_threads_columns(con, ["id", "rollout_path", "title", "preview", "created_at", "updated_at", "recency_at"])
     originals_dir = archive_root / "originals"
@@ -881,8 +1119,12 @@ def main():
     parser.add_argument("--fix-existing-timestamps", action="store_true")
     parser.add_argument("--import-missing", action="store_true")
     parser.add_argument("--archive-and-compact-imports", action="store_true")
+    parser.add_argument("--create-continuation-threads", action="store_true")
     parser.add_argument("--archive-root", default="~/.codex/imported_claude_archive")
     parser.add_argument("--overwrite-manual-titles", action="store_true")
+    parser.add_argument("--overwrite-continuation-threads", action="store_true")
+    parser.add_argument("--continuation-recency", choices=["preserve", "now"], default="preserve")
+    parser.add_argument("--thread-id", help="Limit continuation creation to one archived Claude thread id.")
     parser.add_argument("--include-subagents", action="store_true")
     parser.add_argument("--no-backup", action="store_true")
     args = parser.parse_args()
@@ -925,13 +1167,42 @@ def main():
             print(f"would_archive_and_compact_imported_sessions={archived}")
             print(f"would_skip_manual_title_sessions={skipped_manual}")
             return
+        if args.create_continuation_threads:
+            archive_index_path = expand(args.archive_root) / "index.json"
+            archive_index_rows = json.loads(archive_index_path.read_text(encoding="utf-8")) if archive_index_path.exists() else []
+            con = sqlite3.connect(state_db)
+            try:
+                planned, _, skipped_existing, skipped_missing_summary = create_continuation_threads(
+                    con,
+                    archive_index_rows,
+                    codex_home,
+                    args.cli_version,
+                    True,
+                    args.overwrite_continuation_threads,
+                    args.continuation_recency,
+                    args.thread_id,
+                )
+            finally:
+                con.close()
+            print(f"would_create_continuation_threads={planned}")
+            print(f"would_skip_existing_continuation_threads={skipped_existing}")
+            print(f"would_skip_missing_summary_threads={skipped_missing_summary}")
+            return
         for path in missing[:20]:
             info = analyze_claude_session(path, fallback_home)
             print(f"{iso_z(info['first'])} {iso_z(info['last'])} {info['title']} {path}")
         return
 
-    if not args.fix_existing_timestamps and not args.import_missing and not args.archive_and_compact_imports:
-        raise SystemExit("Choose --dry-run, --fix-existing-timestamps, --import-missing, or --archive-and-compact-imports.")
+    if (
+        not args.fix_existing_timestamps
+        and not args.import_missing
+        and not args.archive_and_compact_imports
+        and not args.create_continuation_threads
+    ):
+        raise SystemExit(
+            "Choose --dry-run, --fix-existing-timestamps, --import-missing, "
+            "--archive-and-compact-imports, or --create-continuation-threads."
+        )
 
     backup_dir = None
     if not args.no_backup:
@@ -946,6 +1217,10 @@ def main():
         archived = 0
         archive_updates = 0
         skipped_manual = 0
+        continuation_planned = 0
+        continuation_created = 0
+        continuation_skipped_existing = 0
+        continuation_skipped_missing_summary = 0
         if args.fix_existing_timestamps:
             fixed = fix_existing_timestamps(con, records, fallback_home)
         if args.import_missing:
@@ -960,6 +1235,24 @@ def main():
                 args.cli_version,
                 False,
                 args.overwrite_manual_titles,
+            )
+        if args.create_continuation_threads:
+            archive_index_path = expand(args.archive_root) / "index.json"
+            archive_index_rows = json.loads(archive_index_path.read_text(encoding="utf-8")) if archive_index_path.exists() else []
+            (
+                continuation_planned,
+                continuation_created,
+                continuation_skipped_existing,
+                continuation_skipped_missing_summary,
+            ) = create_continuation_threads(
+                con,
+                archive_index_rows,
+                codex_home,
+                args.cli_version,
+                False,
+                args.overwrite_continuation_threads,
+                args.continuation_recency,
+                args.thread_id,
             )
         con.commit()
     except Exception:
@@ -976,6 +1269,10 @@ def main():
     print(f"archived_imported_sessions={archived}")
     print(f"archive_thread_updates={archive_updates}")
     print(f"skipped_manual_title_sessions={skipped_manual}")
+    print(f"continuation_threads_planned={continuation_planned}")
+    print(f"continuation_threads_created={continuation_created}")
+    print(f"continuation_threads_skipped_existing={continuation_skipped_existing}")
+    print(f"continuation_threads_skipped_missing_summary={continuation_skipped_missing_summary}")
 
 
 if __name__ == "__main__":

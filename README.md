@@ -32,6 +32,18 @@ python .\scripts\import_claude_sessions_to_codex.py --archive-and-compact-import
 
 Close Codex Desktop before write operations, especially on Windows, to avoid SQLite locks.
 
+## Windows Desktop Recovery
+
+If Codex Desktop breaks after import, do not assume the migrated sessions are corrupt. First check the Desktop/app-server layer:
+
+- Inspect `%LOCALAPPDATA%\Codex\Logs` for `unknown feature key`, websocket disconnects, or app-server exits.
+- Back up `~/.codex/config.toml`, then disable unsupported feature keys and custom MCP/app/plugin experiments.
+- Remove test-only top-level `model` and `model_reasoning_effort` entries to return to Codex defaults.
+- If the machine uses a local app-server wrapper/filter, make sure it forwards `model/list` to the real app-server and does not inject `model` or `modelProvider` into normal thread requests.
+- Relaunch through the known-good Desktop launcher/proxy shortcut, then run `codex doctor --summary`.
+
+Only edit migrated session data after Desktop config, app-server, websocket, and model-list health are verified.
+
 ## Archive Design
 
 Each imported Claude session has three layers:
