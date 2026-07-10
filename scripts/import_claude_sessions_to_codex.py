@@ -793,7 +793,7 @@ def create_continuation_threads(con, index_rows, codex_home, cli_version, dry_ru
                        cli_version = ?,
                        first_user_message = ?,
                        memory_mode = 'enabled',
-                       model = 'gpt-5.5',
+                       model = NULL,
                        created_at_ms = ?,
                        updated_at_ms = ?,
                        thread_source = 'user',
@@ -829,7 +829,7 @@ def create_continuation_threads(con, index_rows, codex_home, cli_version, dry_ru
                 created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms
                 ) VALUES (
                 ?, ?, ?, ?, 'cli', 'openai', ?, ?, '{"type":"disabled"}', 'never',
-                0, 1, 0, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, 'enabled', 'gpt-5.5', NULL,
+                0, 1, 0, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, 'enabled', NULL, NULL,
                 NULL, ?, ?, 'user', ?, ?, ?
                 )
                 """,

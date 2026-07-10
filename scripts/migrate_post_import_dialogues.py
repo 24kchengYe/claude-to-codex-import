@@ -142,8 +142,6 @@ def resume_native_thread(client, con, thread_id):
             "path": rollout_path,
             "cwd": native_threads.strip_extended_prefix(cwd),
             "history": None,
-            "model": "gpt-5.5",
-            "modelProvider": "openai",
             "approvalPolicy": "never",
             "permissions": ":danger-full-access",
             "runtimeWorkspaceRoots": [native_threads.strip_extended_prefix(cwd)],
@@ -180,7 +178,7 @@ def main():
     parser.add_argument("--codex-home", default=str(Path.home() / ".codex"))
     parser.add_argument("--archive-index", default=str(Path.home() / ".codex/imported_claude_archive/index.json"))
     parser.add_argument("--codex-exe", default=str(native_threads.DEFAULT_CLI_EXE))
-    parser.add_argument("--proxy", default="http://127.0.0.1:2080")
+    parser.add_argument("--proxy", help="Override HTTP/HTTPS/ALL_PROXY for the app-server process.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

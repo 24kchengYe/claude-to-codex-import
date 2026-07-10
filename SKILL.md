@@ -18,7 +18,9 @@ Use this skill when a macOS or Windows user wants to migrate local Claude Code h
 - Imported Codex timestamps should come from Claude JSONL line-level `timestamp` fields: earliest line for creation time, latest line for update/recency time.
 - Very long imported Claude sessions are archives, not good continuation targets. Opening them as active Codex threads can exceed the model context window because Codex may load the full converted rollout.
 - On Windows Codex Desktop, a Claude archive row may be readable but fail when the user sends a new message because the app-server tries to resume an old external-agent thread id. Treat archive rows as read-only history. For continuation, create a separate Codex-native thread through app-server `thread/start` + `thread/inject_items`; do not hand-write rows into `state_5.sqlite` and expect them to be resumable.
+- Imported/read-only archive threads may also reject mid-conversation model changes with `thread/settings/update: thread not found`. This is expected for archive compatibility rows. New native continuation threads inherit the current Codex model unless the user later selects another model.
 - Continuation threads can preserve the original Claude session timestamp, so migrated history stays under the right project and date instead of all appearing as new work today.
+- A very large resumed rollout with repeated compactions or embedded images can repeatedly disconnect WebSocket transport before falling back to HTTP. Prefer a compact handoff into a new native thread instead of continuing a 100 MB-class archive.
 - Codex Desktop resume/startup failures after migration are not always bad rollout data. On Windows, also inspect Desktop logs, config feature keys, custom MCP/app settings, and any local app-server wrapper before editing sessions.
 
 ## Workflow
@@ -53,6 +55,7 @@ Use this skill when a macOS or Windows user wants to migrate local Claude Code h
    python3 scripts/create_native_continuation_threads.py
    ```
    This uses Codex's own app-server to create threads and injects a compact prompt pointing to the Markdown summary and original Claude JSONL. It then patches display timestamps back to the original Claude session time.
+   The script inherits existing proxy environment variables. Use `--proxy <url>` only when an explicit override is required, for example `--proxy http://127.0.0.1:2080` on a machine with that local proxy.
    To test one archive first:
    ```bash
    python3 scripts/create_native_continuation_threads.py --thread-id <archived-thread-id>
@@ -99,13 +102,16 @@ Use this checklist when Codex Desktop fails after import, cross-session resume f
    Look for `unknown feature key`, `app-server is not available`, `stream disconnected`, websocket errors, or startup process exits.
 2. Back up `~/.codex/config.toml`, then remove or comment unsupported feature keys that the installed app-server rejects. If errors mention `thread_tools`, `agent_todos`, `remote_plugin`, `enable_mcp_apps`, or app/MCP features, isolate those first instead of rewriting session files.
 3. Temporarily disable custom MCP servers and app/plugin experiments in `config.toml`. Keep built-in runtime MCP entries only when the current Desktop build requires them.
-4. If a top-level `model = ...` or `model_reasoning_effort = ...` was added for testing, remove it to return to Codex's built-in recommended default. Re-test with:
+4. Do not remove a top-level `model = ...` or `model_reasoning_effort = ...` merely because it exists: current Desktop builds write these keys for normal model selection. Remove them only when evidence shows they were test overrides or the user explicitly wants the recommended default. Re-test with:
    ```powershell
    codex doctor --summary
    ```
 5. If the machine uses a local app-server wrapper/filter, inspect it for model-related rewriting. It should not synthesize `model/list`, and it should not inject `model` or `modelProvider` into `thread/start`, `thread/resume`, or `turn/start` unless the user explicitly wants a forced model. A wrapper that fakes `model/list` can make Desktop show "custom" even when `config.toml` is clean.
-6. Relaunch Desktop from the known-good launcher or shortcut that preserves the required proxy/runtime environment. Verify the running app-server path and run `codex doctor --summary` again.
-7. Only after Desktop config, app-server, websocket, and model-list health are verified should you modify imported sessions or create continuation threads.
+6. After a Store update, read `AppxManifest.xml` instead of hardcoding `app\Codex.exe`; newer Windows packages may launch `app\ChatGPT.exe`. A proxy launcher should resolve the manifest executable and dynamically locate the current CLI rather than retain a stale copied binary.
+7. Relaunch Desktop from the known-good launcher or shortcut that preserves the required proxy/runtime environment. Verify the running app-server executable and command line; launching the plain Store entry may bypass a wrapper/filter even when the shortcut is correct.
+8. When rolling back a bad custom MCP edit, compare against a timestamped pre-change backup. Remove the custom server without deleting the built-in `node_repl`; verify its command and Node paths still resolve because Desktop updates rotate runtime directories.
+9. Run `codex doctor --summary`. Require config/auth/MCP/install health and inspect WebSocket/reachability separately. Remaining rollout/state parity warnings concern migrated thread inventory and should not be "fixed" by deleting source rollouts.
+10. Only after Desktop config, app-server, websocket, and model-list health are verified should you modify imported sessions or create continuation threads.
 
 ## Safety Rules
 

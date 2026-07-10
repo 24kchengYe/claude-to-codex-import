@@ -9,6 +9,7 @@ Import local Claude Code conversations into Codex Desktop while preserving accur
 - Repairs imported thread timestamps from Claude line-level `timestamp` fields.
 - Converts long imported Claude rollouts into compact Codex archive entries so they remain clickable but do not load the full old conversation into context.
 - Stores full original JSONL copies and rich Markdown summaries under `~/.codex/imported_claude_archive`.
+- Creates Codex-native continuation threads that inherit the user's current model instead of pinning an old model version.
 
 ## Recommended Flow
 
@@ -32,15 +33,21 @@ python .\scripts\import_claude_sessions_to_codex.py --archive-and-compact-import
 
 Close Codex Desktop before write operations, especially on Windows, to avoid SQLite locks.
 
+Continuation scripts inherit existing proxy environment variables. Pass `--proxy <url>` only to override them for the spawned app-server; no machine-specific proxy is assumed by default.
+
 ## Windows Desktop Recovery
 
 If Codex Desktop breaks after import, do not assume the migrated sessions are corrupt. First check the Desktop/app-server layer:
 
 - Inspect `%LOCALAPPDATA%\Codex\Logs` for `unknown feature key`, websocket disconnects, or app-server exits.
 - Back up `~/.codex/config.toml`, then disable unsupported feature keys and custom MCP/app/plugin experiments.
-- Remove test-only top-level `model` and `model_reasoning_effort` entries to return to Codex defaults.
+- Preserve model keys written by the current Desktop model picker; remove them only when they are confirmed test overrides or the user wants the recommended default.
 - If the machine uses a local app-server wrapper/filter, make sure it forwards `model/list` to the real app-server and does not inject `model` or `modelProvider` into normal thread requests.
-- Relaunch through the known-good Desktop launcher/proxy shortcut, then run `codex doctor --summary`.
+- After Store updates, resolve the executable from `AppxManifest.xml` because the package entry may be `ChatGPT.exe`, and resolve the current CLI dynamically instead of retaining a stale copy.
+- Roll back custom MCP experiments from a pre-change backup, but retain built-in `node_repl` only when its runtime paths exist.
+- Relaunch through the known-good Desktop launcher/proxy shortcut, verify the running app-server path, then run `codex doctor --summary`.
+
+Old archive compatibility rows are read-only. They may display correctly but reject model changes with `thread/settings/update: thread not found`. Continue in a generated Codex-native thread. For very large rollouts with repeated WebSocket fallback, create a compact handoff/new native thread rather than extending the archive.
 
 Only edit migrated session data after Desktop config, app-server, websocket, and model-list health are verified.
 

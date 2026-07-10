@@ -246,7 +246,7 @@ def main():
     parser.add_argument("--codex-home", default=str(Path.home() / ".codex"))
     parser.add_argument("--archive-index", default=str(Path.home() / ".codex/imported_claude_archive/index.json"))
     parser.add_argument("--codex-exe", default=str(DEFAULT_CLI_EXE))
-    parser.add_argument("--proxy", default="http://127.0.0.1:2080")
+    parser.add_argument("--proxy", help="Override HTTP/HTTPS/ALL_PROXY for the app-server process.")
     parser.add_argument("--thread-id")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--dry-run", action="store_true")
@@ -295,8 +295,6 @@ def main():
                         "thread/start",
                         {
                             "cwd": strip_extended_prefix(cwd),
-                            "model": "gpt-5.5",
-                            "modelProvider": "openai",
                             "approvalPolicy": "never",
                             "sandbox": "danger-full-access",
                             "approvalsReviewer": "user",
